@@ -1,25 +1,38 @@
-جاهز للرفع على Railway.
+Railway + GitHub Deployment
+===========================
 
-الملفات:
-- index.js : كل منطق البوت داخل ملف واحد فقط.
-- package.json : تبعيات التشغيل.
-- Dockerfile : يثبت ffmpeg و yt-dlp تلقائيا على Railway.
-- .env.example : مثال على متغيرات البيئة.
+1) Put these files in the root of your GitHub repository.
+2) In Railway, create a new project from GitHub.
+3) Railway will detect Dockerfile automatically and build from it.
+4) Add your environment variables in Railway -> Variables.
+5) Deploy.
 
-متغيرات البيئة التي تضعها في Railway:
-- BOT_TOKEN : توكن البوت الجديد من BotFather.
-- BOT_RIGHTS : اسم الحقوق الظاهر داخل رسائل البوت.
-- TMP_DIR : مجلد مؤقت لحفظ الملفات قبل الارسال.
-- MAX_FILE_SIZE_MB : الحد الاقصى لحجم الملف قبل ارساله.
-- PORT : منفذ داخلي. اتركه 3000.
-- YTDLP_PATH : مسار yt-dlp. اتركه yt-dlp مع هذا Dockerfile.
+Required variables
+------------------
+BOT_TOKEN           Telegram bot token from BotFather (use a NEW token)
+BOT_RIGHTS          Text shown in bot captions, e.g. @VidSave_ProBot
+TMP_DIR             Temporary downloads folder, recommended: ./downloads
+MAX_FILE_SIZE_MB    Telegram upload safety limit; recommended 48
+PORT                Railway port; recommended 3000
+YTDLP_PATH          Path to yt-dlp inside Docker, recommended /usr/local/bin/yt-dlp
 
-الرفع على Railway:
-1) ارفع محتويات هذا الملف المضغوط الى GitHub او ارفعها مباشرة كمشروع.
-2) في Railway اختر Deploy from GitHub او New Project.
-3) اضف متغير البيئة BOT_TOKEN على الاقل.
-4) سيبني المشروع باستخدام Dockerfile ويشغل البوت تلقائيا.
+Optional variables
+------------------
+USE_WEBHOOK         true/false. false = long polling. true = webhook mode.
+WEBHOOK_DOMAIN      Your public Railway domain if using webhook.
+WEBHOOK_PATH        Webhook path, e.g. /telegram-webhook
+COBALT_API_URL      Optional fallback downloader API compatible with Cobalt
+COBALT_API_KEY      Optional API key for your Cobalt instance if protected
+RAPIDAPI_KEY        Optional RapidAPI key for Instagram fallback API
+RAPIDAPI_INSTAGRAM_HOST  RapidAPI host header for the Instagram API provider
+IG_COOKIES_B64      Base64 of cookies.txt for authenticated Instagram extraction
+IG_COOKIES_URL      Alternative: direct URL to a cookies.txt file
+REQUEST_TIMEOUT_MS  Timeout per provider request; recommended 30000
+PROVIDER_RETRY_COUNT Retry count per provider; recommended 1
 
-ملاحظة:
-- غير التوكن القديم فورا لانه تم كشفه سابقا.
-- لو كان رابط انستغرام خاص او محمي قد يفشل التحميل.
+Important notes
+---------------
+- Instagram Stories often need authentication or can hit rate limits.
+- If stories fail, set IG_COOKIES_B64 or IG_COOKIES_URL.
+- Do NOT put your token inside code.
+- If your old token was exposed, revoke it in BotFather and generate a new one.
