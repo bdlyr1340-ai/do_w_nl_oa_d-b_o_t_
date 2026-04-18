@@ -1,7 +1,6 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const https = require('https');
 const http = require('http');
 const { execFile } = require('child_process');
@@ -14,6 +13,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const BOT_RIGHTS = process.env.BOT_RIGHTS || '@VidSave_ProBot';
 const TMP_DIR = process.env.TMP_DIR || path.join(__dirname, 'downloads');
 const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB || 48);
+const PORT = Number(process.env.PORT || 3000);
+const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp';
 
 if (!BOT_TOKEN) {
   console.error('Missing BOT_TOKEN in environment variables');
@@ -78,42 +79,6 @@ function makeRequest(url, options = {}) {
   });
 }
 
-function downloadFile(fileUrl, destination) {
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(destination);
-    const lib = fileUrl.startsWith('https') ? https : http;
-
-    const request = lib.get(fileUrl, (response) => {
-      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-        file.close();
-        fs.unlink(destination, () => {
-          downloadFile(response.headers.location, destination).then(resolve).catch(reject);
-        });
-        return;
-      }
-
-      if (response.statusCode !== 200) {
-        file.close();
-        fs.unlink(destination, () => {});
-        reject(new Error(`Failed to download file. Status code: ${response.statusCode}`));
-        return;
-      }
-
-      response.pipe(file);
-
-      file.on('finish', () => {
-        file.close(() => resolve(destination));
-      });
-    });
-
-    request.on('error', (err) => {
-      file.close();
-      fs.unlink(destination, () => {});
-      reject(err);
-    });
-  });
-}
-
 function removeFileSafe(filePath) {
   try {
     if (filePath && fs.existsSync(filePath)) {
@@ -125,7 +90,7 @@ function removeFileSafe(filePath) {
 function cleanupOldFiles() {
   try {
     const now = Date.now();
-    const maxAge = 1000 * 60 * 60; // ساعة
+    const maxAge = 1000 * 60 * 60;
 
     for (const name of fs.readdirSync(TMP_DIR)) {
       const filePath = path.join(TMP_DIR, name);
@@ -169,11 +134,22 @@ function cleanupPendingUrls() {
 }
 
 async function runYtDlp(args) {
-  const { stdout, stderr } = await execFileAsync('yt-dlp', args, {
+  const { stdout, stderr } = await execFileAsync(YTDLP_PATH, args, {
     windowsHide: true,
     maxBuffer: 1024 * 1024 * 20
   });
   return { stdout, stderr };
+}
+
+async function checkDependencies() {
+  try {
+    await execFileAsync(YTDLP_PATH, ['--version']);
+    console.log(`yt-dlp is ready: ${YTDLP_PATH}`);
+  } catch (error) {
+    console.error('yt-dlp not found. Set YTDLP_PATH or install yt-dlp.');
+    console.error(error.message);
+    process.exit(1);
+  }
 }
 
 async function downloadInstagramVideo(url) {
@@ -280,12 +256,7 @@ bot.start(async (ctx) => {
   cleanupPendingUrls();
 
   await ctx.reply(
-    `أهلاً بك في بوت التحميل الذكي 🚀
-
-- أرسل رابط تيك توك أو إنستغرام للتحميل المباشر.
-- أرسل رابط يوتيوب للاختيار بين (فيديو أو صوت).
-
-بواسطة: ${BOT_RIGHTS}`
+    `أهلاً بك في بوت التحميل الذكي 🚀\n\n- أرسل رابط تيك توك أو إنستغرام للتحميل المباشر.\n- أرسل رابط يوتيوب للاختيار بين (فيديو أو صوت).\n\nبواسطة: ${BOT_RIGHTS}`
   );
 });
 
@@ -448,7 +419,9 @@ process.once('SIGTERM', () => bot.stop('SIGTERM'));
   try {
     cleanupOldFiles();
     cleanupPendingUrls();
+    await checkDependencies();
     await bot.launch();
+    console.log(`Bot is running on port ${PORT}`);
     console.log('البوت شغال بنظام الأزرار والحقوق... جربه هسه! 🚀');
   } catch (error) {
     console.error('Startup error:', error);
