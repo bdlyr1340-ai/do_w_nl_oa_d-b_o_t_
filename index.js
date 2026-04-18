@@ -1,369 +1,457 @@
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
+const https = require('https');
+const http = require('http');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const { Telegraf, Markup } = require('telegraf');
-const ffmpeg = require('fluent-ffmpeg');
-const { Pool } = require('pg');
-const { exec } = require('child_process');
-const util = require('util');
 
-const execAsync = util.promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const DATABASE_URL = process.env.DATABASE_URL || '';
-const TMP_DIR = process.env.TMP_DIR || './tmp';
-const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB || 50);
-const PORT = Number(process.env.PORT || 3000);
-const USE_WEBHOOK = String(process.env.USE_WEBHOOK || 'false') === 'true';
-const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN || '';
-const WEBHOOK_PATH = process.env.WEBHOOK_PATH || '/telegram-webhook';
+const BOT_RIGHTS = process.env.BOT_RIGHTS || '@VidSave_ProBot';
+const TMP_DIR = process.env.TMP_DIR || path.join(__dirname, 'downloads');
+const MAX_FILE_SIZE_MB = Number(process.env.MAX_FILE_SIZE_MB || 48);
 
 if (!BOT_TOKEN) {
   console.error('Missing BOT_TOKEN in environment variables');
   process.exit(1);
 }
 
-if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+if (!fs.existsSync(TMP_DIR)) {
+  fs.mkdirSync(TMP_DIR, { recursive: true });
+}
 
 const bot = new Telegraf(BOT_TOKEN);
+const pendingUrls = new Map();
 
-const pool = DATABASE_URL
-  ? new Pool({
-      connectionString: DATABASE_URL,
-      ssl: DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false }
-    })
-  : null;
-
-async function initDb() {
-  if (!pool) return;
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      telegram_id BIGINT UNIQUE NOT NULL,
-      username TEXT,
-      full_name TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS jobs (
-      id SERIAL PRIMARY KEY,
-      telegram_id BIGINT NOT NULL,
-      username TEXT,
-      source_type TEXT NOT NULL,
-      task_type TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      input_file_id TEXT,
-      input_file_path TEXT,
-      output_file_path TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
+function isTikTokUrl(text = '') {
+  return /https?:\/\/[^\s]*tiktok\.com\/[^\s]+/i.test(text) || /https?:\/\/vm\.tiktok\.com\/[^\s]+/i.test(text);
 }
 
-async function saveUser(user) {
-  if (!pool || !user) return;
-
-  await pool.query(
-    `INSERT INTO users (telegram_id, username, full_name)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (telegram_id)
-     DO UPDATE SET username = EXCLUDED.username, full_name = EXCLUDED.full_name`,
-    [
-      user.id,
-      user.username || null,
-      [user.first_name, user.last_name].filter(Boolean).join(' ') || null
-    ]
-  );
+function isInstagramUrl(text = '') {
+  return /https?:\/\/[^\s]*instagram\.com\/[^\s]+/i.test(text);
 }
 
-async function saveJob(data) {
-  if (!pool) return null;
-
-  const result = await pool.query(
-    `INSERT INTO jobs (telegram_id, username, source_type, task_type, status, input_file_id, input_file_path, output_file_path)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id`,
-    [
-      data.telegram_id,
-      data.username || null,
-      data.source_type,
-      data.task_type,
-      data.status || 'pending',
-      data.input_file_id || null,
-      data.input_file_path || null,
-      data.output_file_path || null
-    ]
-  );
-
-  return result.rows[0]?.id || null;
-}
-
-async function updateJob(jobId, status, outputPath = null) {
-  if (!pool || !jobId) return;
-
-  await pool.query(
-    'UPDATE jobs SET status = $1, output_file_path = COALESCE($2, output_file_path) WHERE id = $3',
-    [status, outputPath, jobId]
-  );
-}
-
-function getMainMenu() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback('تحميل الفيديو من الرابط', 'download_video')],
-    [Markup.button.callback('تحويل آخر ملف إلى MP3', 'to_mp3')],
-    [Markup.button.callback('إحصائيات', 'stats')]
-  ]);
-}
-
-function userStateFile(userId) {
-  return path.join(TMP_DIR, `${userId}.json`);
-}
-
-function setUserState(userId, data) {
-  fs.writeFileSync(userStateFile(userId), JSON.stringify(data, null, 2));
-}
-
-function getUserState(userId) {
-  const file = userStateFile(userId);
-  if (!fs.existsSync(file)) return null;
-  return JSON.parse(fs.readFileSync(file, 'utf8'));
-}
-
-function clearUserState(userId) {
-  const file = userStateFile(userId);
-  if (fs.existsSync(file)) fs.unlinkSync(file);
-}
-
-function cleanupFile(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (err) {
-    console.error('Cleanup error:', err.message);
-  }
-}
-
-function isSupportedUrl(text = '') {
-  const urlRegex = /(https?:\/\/[^\s]+)/i;
-  if (!urlRegex.test(text)) return false;
-
-  return /instagram\.com|instagr\.am|tiktok\.com|vm\.tiktok\.com/i.test(text);
+function isYoutubeUrl(text = '') {
+  return /https?:\/\/([^\s]+\.)?(youtube\.com|youtu\.be)\/[^\s]+/i.test(text);
 }
 
 function extractUrl(text = '') {
-  const match = text.match(/(https?:\/\/[^\s]+)/i);
-  return match ? match[1] : null;
+  const match = text.match(/https?:\/\/[^\s]+/i);
+  return match ? match[0] : null;
 }
 
-function convertToMp3(inputPath, outputPath) {
+function makeRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
-      .noVideo()
-      .audioCodec('libmp3lame')
-      .audioBitrate('192k')
-      .on('end', () => resolve(outputPath))
-      .on('error', reject)
-      .save(outputPath);
+    const lib = url.startsWith('https') ? https : http;
+    const req = lib.request(url, options, (res) => {
+      let data = '';
+
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        resolve(makeRequest(res.headers.location, options));
+        return;
+      }
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        resolve({
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body: data
+        });
+      });
+    });
+
+    req.on('error', reject);
+
+    if (options.body) {
+      req.write(options.body);
+    }
+
+    req.end();
   });
 }
 
-async function downloadWithYtDlp(url, userId) {
-  const outputTemplate = path.join(TMP_DIR, `${userId}-${Date.now()}-%(title).80s.%(ext)s`);
+function downloadFile(fileUrl, destination) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destination);
+    const lib = fileUrl.startsWith('https') ? https : http;
 
-  const command = `yt-dlp -f "mp4/bestvideo+bestaudio/best" --merge-output-format mp4 -o "${outputTemplate}" "${url}"`;
-  await execAsync(command);
+    const request = lib.get(fileUrl, (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        file.close();
+        fs.unlink(destination, () => {
+          downloadFile(response.headers.location, destination).then(resolve).catch(reject);
+        });
+        return;
+      }
+
+      if (response.statusCode !== 200) {
+        file.close();
+        fs.unlink(destination, () => {});
+        reject(new Error(`Failed to download file. Status code: ${response.statusCode}`));
+        return;
+      }
+
+      response.pipe(file);
+
+      file.on('finish', () => {
+        file.close(() => resolve(destination));
+      });
+    });
+
+    request.on('error', (err) => {
+      file.close();
+      fs.unlink(destination, () => {});
+      reject(err);
+    });
+  });
+}
+
+function removeFileSafe(filePath) {
+  try {
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch (_) {}
+}
+
+function cleanupOldFiles() {
+  try {
+    const now = Date.now();
+    const maxAge = 1000 * 60 * 60; // ساعة
+
+    for (const name of fs.readdirSync(TMP_DIR)) {
+      const filePath = path.join(TMP_DIR, name);
+      const stat = fs.statSync(filePath);
+      if (now - stat.mtimeMs > maxAge) {
+        removeFileSafe(filePath);
+      }
+    }
+  } catch (_) {}
+}
+
+function randomId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function createYoutubeButtons(url) {
+  const key = randomId();
+  pendingUrls.set(key, {
+    url,
+    createdAt: Date.now()
+  });
+
+  return {
+    key,
+    markup: Markup.inlineKeyboard([
+      [
+        Markup.button.callback('تحميل صوت (MP3) 🎵', `mp3:${key}`),
+        Markup.button.callback('تحميل فيديو (MP4) 🎬', `mp4:${key}`)
+      ]
+    ])
+  };
+}
+
+function cleanupPendingUrls() {
+  const now = Date.now();
+  for (const [key, value] of pendingUrls.entries()) {
+    if (now - value.createdAt > 1000 * 60 * 30) {
+      pendingUrls.delete(key);
+    }
+  }
+}
+
+async function runYtDlp(args) {
+  const { stdout, stderr } = await execFileAsync('yt-dlp', args, {
+    windowsHide: true,
+    maxBuffer: 1024 * 1024 * 20
+  });
+  return { stdout, stderr };
+}
+
+async function downloadInstagramVideo(url) {
+  const template = path.join(TMP_DIR, 'ig_%(id)s.%(ext)s');
+
+  await runYtDlp([
+    '-f', 'best[ext=mp4]/best',
+    '--no-playlist',
+    '-o', template,
+    url
+  ]);
 
   const files = fs
     .readdirSync(TMP_DIR)
-    .map(name => path.join(TMP_DIR, name))
-    .filter(file => file.includes(`${userId}-`))
+    .filter((name) => name.startsWith('ig_'))
+    .map((name) => path.join(TMP_DIR, name))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 
   if (!files.length) {
-    throw new Error('لم يتم العثور على الملف بعد التحميل');
+    throw new Error('لم يتم العثور على ملف إنستغرام بعد التحميل');
   }
 
   return files[0];
 }
 
-async function processUserMp3(ctx) {
-  const userId = ctx.from.id;
-  const state = getUserState(userId);
+async function downloadYoutubeVideo(url) {
+  const template = path.join(TMP_DIR, 'yt_vid_%(id)s.%(ext)s');
 
-  if (!state?.input_path || !fs.existsSync(state.input_path)) {
-    await ctx.reply('لا يوجد ملف محفوظ. أرسل رابط فيديو أولاً.');
-    return;
+  await runYtDlp([
+    '-f', 'best[ext=mp4]/best',
+    '--no-playlist',
+    '-o', template,
+    url
+  ]);
+
+  const files = fs
+    .readdirSync(TMP_DIR)
+    .filter((name) => name.startsWith('yt_vid_'))
+    .map((name) => path.join(TMP_DIR, name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+
+  if (!files.length) {
+    throw new Error('لم يتم العثور على ملف فيديو يوتيوب بعد التحميل');
   }
 
-  const jobId = await saveJob({
-    telegram_id: ctx.from.id,
-    username: ctx.from.username,
-    source_type: state.source_type || 'url_download',
-    task_type: 'mp3',
-    status: 'processing',
-    input_file_path: state.input_path
-  });
+  return files[0];
+}
 
-  try {
-    await ctx.reply('جاري تحويل الملف إلى MP3...');
+async function downloadYoutubeAudio(url) {
+  const template = path.join(TMP_DIR, 'audio_%(id)s.%(ext)s');
 
-    const outputPath = path.join(TMP_DIR, `${userId}-${Date.now()}.mp3`);
-    await convertToMp3(state.input_path, outputPath);
+  await runYtDlp([
+    '-x',
+    '--audio-format', 'mp3',
+    '--no-playlist',
+    '-o', template,
+    url
+  ]);
 
-    await ctx.replyWithAudio({ source: outputPath });
-    await updateJob(jobId, 'done', outputPath);
+  const files = fs
+    .readdirSync(TMP_DIR)
+    .filter((name) => name.startsWith('audio_'))
+    .map((name) => path.join(TMP_DIR, name))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
 
-    cleanupFile(outputPath);
-  } catch (error) {
-    console.error(error);
-    await updateJob(jobId, 'failed');
-    await ctx.reply('حدث خطأ أثناء تحويل الملف إلى MP3. تأكد أن ffmpeg مثبت بشكل صحيح.');
+  if (!files.length) {
+    throw new Error('لم يتم العثور على ملف صوت يوتيوب بعد التحميل');
   }
+
+  return files[0];
+}
+
+function getFileSizeMb(filePath) {
+  const stat = fs.statSync(filePath);
+  return stat.size / 1024 / 1024;
+}
+
+async function sendLocalVideo(ctx, filePath, caption) {
+  const sizeMb = getFileSizeMb(filePath);
+  if (sizeMb > MAX_FILE_SIZE_MB) {
+    throw new Error(`حجم الملف ${sizeMb.toFixed(2)}MB أكبر من الحد المسموح ${MAX_FILE_SIZE_MB}MB`);
+  }
+
+  await ctx.replyWithVideo(
+    { source: filePath },
+    { caption }
+  );
+}
+
+async function sendLocalAudio(ctx, filePath, caption) {
+  const sizeMb = getFileSizeMb(filePath);
+  if (sizeMb > MAX_FILE_SIZE_MB) {
+    throw new Error(`حجم الملف ${sizeMb.toFixed(2)}MB أكبر من الحد المسموح ${MAX_FILE_SIZE_MB}MB`);
+  }
+
+  await ctx.replyWithAudio(
+    { source: filePath },
+    { caption }
+  );
 }
 
 bot.start(async (ctx) => {
-  await saveUser(ctx.from);
+  cleanupOldFiles();
+  cleanupPendingUrls();
+
   await ctx.reply(
-    'أهلاً بك.\n\nأرسل رابط فيديو من إنستغرام أو تيك توك، وسأقوم بتحميله لك.\nبعد التحميل يمكنك أيضًا تحويل آخر ملف إلى MP3.',
-    getMainMenu()
+    `أهلاً بك في بوت التحميل الذكي 🚀
+
+- أرسل رابط تيك توك أو إنستغرام للتحميل المباشر.
+- أرسل رابط يوتيوب للاختيار بين (فيديو أو صوت).
+
+بواسطة: ${BOT_RIGHTS}`
   );
-});
-
-bot.command('help', async (ctx) => {
-  await ctx.reply(
-    'طريقة الاستخدام:\n1) أرسل رابط من Instagram أو TikTok\n2) سيقوم البوت بتحميل الفيديو\n3) يمكنك الضغط على "تحويل آخر ملف إلى MP3"\n\nالأوامر:\n/start\n/help\n/stats',
-    getMainMenu()
-  );
-});
-
-bot.command('stats', async (ctx) => {
-  if (!pool) {
-    await ctx.reply('قاعدة البيانات غير مفعلة. أضف DATABASE_URL.');
-    return;
-  }
-
-  const users = await pool.query('SELECT COUNT(*)::int AS count FROM users');
-  const jobs = await pool.query('SELECT COUNT(*)::int AS count FROM jobs');
-
-  await ctx.reply(`عدد المستخدمين: ${users.rows[0].count}\nعدد العمليات: ${jobs.rows[0].count}`);
-});
-
-bot.action('download_video', async (ctx) => {
-  await ctx.answerCbQuery();
-  await ctx.reply('أرسل الآن رابط الفيديو من Instagram أو TikTok.');
-});
-
-bot.action('to_mp3', async (ctx) => {
-  await ctx.answerCbQuery();
-  await processUserMp3(ctx);
-});
-
-bot.action('stats', async (ctx) => {
-  await ctx.answerCbQuery();
-
-  if (!pool) {
-    await ctx.reply('قاعدة البيانات غير مفعلة. أضف DATABASE_URL.');
-    return;
-  }
-
-  const users = await pool.query('SELECT COUNT(*)::int AS count FROM users');
-  const jobs = await pool.query('SELECT COUNT(*)::int AS count FROM jobs');
-
-  await ctx.reply(`عدد المستخدمين: ${users.rows[0].count}\nعدد العمليات: ${jobs.rows[0].count}`);
 });
 
 bot.on('text', async (ctx) => {
-  await saveUser(ctx.from);
+  cleanupOldFiles();
+  cleanupPendingUrls();
 
-  const text = ctx.message.text?.trim() || '';
-  if (!isSupportedUrl(text)) {
-    await ctx.reply('أرسل رابطًا صحيحًا من Instagram أو TikTok.', getMainMenu());
-    return;
-  }
-
+  const text = (ctx.message.text || '').trim();
   const url = extractUrl(text);
+
   if (!url) {
-    await ctx.reply('تعذر استخراج الرابط. أرسل الرابط بشكل صحيح.');
+    await ctx.reply('❌ أرسل رابطًا صحيحًا من تيك توك أو إنستغرام أو يوتيوب.');
     return;
   }
 
-  let downloadedFile = null;
-  let jobId = null;
+  if (isTikTokUrl(url)) {
+    const waitMsg = await ctx.reply('جاري سحب فيديو تيك توك... ⚡');
 
-  try {
-    await ctx.reply('جاري تحميل الفيديو من الرابط...');
+    try {
+      const body = `url=${encodeURIComponent(url)}`;
+      const response = await makeRequest('https://www.tikwm.com/api/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Length': Buffer.byteLength(body)
+        },
+        body
+      });
 
-    jobId = await saveJob({
-      telegram_id: ctx.from.id,
-      username: ctx.from.username,
-      source_type: 'url',
-      task_type: 'download_video',
-      status: 'processing',
-      input_file_path: url
-    });
+      const json = JSON.parse(response.body || '{}');
 
-    downloadedFile = await downloadWithYtDlp(url, ctx.from.id);
-
-    const stats = fs.statSync(downloadedFile);
-    const sizeMb = stats.size / 1024 / 1024;
-
-    if (sizeMb > MAX_FILE_SIZE_MB) {
-      await updateJob(jobId, 'failed');
-      cleanupFile(downloadedFile);
-      await ctx.reply(`تم التحميل لكن حجم الملف ${sizeMb.toFixed(2)}MB وهو أكبر من الحد المسموح ${MAX_FILE_SIZE_MB}MB`);
-      return;
+      if (json.code === 0 && json.data && json.data.play) {
+        await ctx.replyWithVideo(json.data.play, {
+          caption: `✅ تم تحميل الفيديو بواسطة: ${BOT_RIGHTS}`
+        });
+        await ctx.deleteMessage(waitMsg.message_id).catch(() => {});
+      } else {
+        await ctx.telegram.editMessageText(
+          ctx.chat.id,
+          waitMsg.message_id,
+          undefined,
+          '❌ الرابط به مشكلة.'
+        ).catch(async () => {
+          await ctx.reply('❌ الرابط به مشكلة.');
+        });
+      }
+    } catch (error) {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        waitMsg.message_id,
+        undefined,
+        '❌ حدث خطأ أثناء التحميل.'
+      ).catch(async () => {
+        await ctx.reply('❌ حدث خطأ أثناء التحميل.');
+      });
     }
 
-    setUserState(ctx.from.id, {
-      input_path: downloadedFile,
-      source_type: 'url_download',
-      uploaded_at: Date.now()
-    });
+    return;
+  }
 
-    await ctx.replyWithVideo({ source: downloadedFile });
-    await updateJob(jobId, 'done', downloadedFile);
+  if (isYoutubeUrl(url)) {
+    const { markup } = createYoutubeButtons(url);
+    await ctx.reply('لقد أرسلت رابط يوتيوب، اختر الصيغة المطلوبة:', markup);
+    return;
+  }
 
-    await ctx.reply('تم تحميل الفيديو بنجاح. يمكنك الآن تحويل آخر ملف إلى MP3.', getMainMenu());
+  if (isInstagramUrl(url)) {
+    const waitMsg = await ctx.reply('جاري سحب فيديو إنستغرام... ⏳');
+    let filePath = null;
+
+    try {
+      filePath = await downloadInstagramVideo(url);
+
+      await sendLocalVideo(
+        ctx,
+        filePath,
+        `✅ تم تحميل الفيديو بواسطة: ${BOT_RIGHTS}`
+      );
+
+      await ctx.deleteMessage(waitMsg.message_id).catch(() => {});
+    } catch (error) {
+      await ctx.telegram.editMessageText(
+        ctx.chat.id,
+        waitMsg.message_id,
+        undefined,
+        `❌ فشل التحميل. تأكد أن الحساب عام.\n${error.message}`
+      ).catch(async () => {
+        await ctx.reply(`❌ فشل التحميل. تأكد أن الحساب عام.\n${error.message}`);
+      });
+    } finally {
+      removeFileSafe(filePath);
+    }
+
+    return;
+  }
+
+  await ctx.reply('❌ هذا الرابط غير مدعوم.');
+});
+
+bot.action(/^(mp3|mp4):(.+)$/, async (ctx) => {
+  cleanupOldFiles();
+  cleanupPendingUrls();
+
+  await ctx.answerCbQuery('جاري التحميل... انتظر ثواني');
+
+  const action = ctx.match[1];
+  const key = ctx.match[2];
+  const saved = pendingUrls.get(key);
+
+  if (!saved || !saved.url) {
+    await ctx.reply('❌ انتهت صلاحية الرابط. أرسله من جديد.');
+    return;
+  }
+
+  const url = saved.url;
+  const waitMsg = await ctx.reply('جاري معالجة طلبك من يوتيوب... ⏳');
+
+  let filePath = null;
+
+  try {
+    if (action === 'mp3') {
+      filePath = await downloadYoutubeAudio(url);
+      await sendLocalAudio(
+        ctx,
+        filePath,
+        `✅ تم تحميل الصوت بواسطة: ${BOT_RIGHTS}`
+      );
+    } else {
+      filePath = await downloadYoutubeVideo(url);
+      await sendLocalVideo(
+        ctx,
+        filePath,
+        `✅ تم تحميل الفيديو بواسطة: ${BOT_RIGHTS}`
+      );
+    }
+
+    await ctx.deleteMessage(waitMsg.message_id).catch(() => {});
   } catch (error) {
-    console.error('Download error:', error);
-
-    if (jobId) await updateJob(jobId, 'failed');
-
-    await ctx.reply(
-      'حدث خطأ أثناء تحميل الفيديو.\nتأكد من:\n- أن الرابط صحيح\n- أن الفيديو عام وليس خاصًا\n- وأن yt-dlp مثبت على السيرفر'
-    );
-  }
-});
-
-bot.on('message', async (ctx) => {
-  if (ctx.message.text) return;
-  await ctx.reply('أرسل رابط فيديو من Instagram أو TikTok فقط.', getMainMenu());
-});
-
-async function start() {
-  await initDb();
-
-  if (USE_WEBHOOK && WEBHOOK_DOMAIN) {
-    await bot.launch({
-      webhook: {
-        domain: WEBHOOK_DOMAIN,
-        hookPath: WEBHOOK_PATH,
-        port: PORT
-      }
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      waitMsg.message_id,
+      undefined,
+      `❌ حدث خطأ: ${error.message}`
+    ).catch(async () => {
+      await ctx.reply(`❌ حدث خطأ: ${error.message}`);
     });
-    console.log(`Bot running with webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH}`);
-  } else {
-    await bot.launch();
-    console.log('Bot running with long polling');
+  } finally {
+    removeFileSafe(filePath);
   }
-}
+});
 
-start().catch((err) => {
-  console.error('Startup error:', err);
-  process.exit(1);
+bot.catch((err) => {
+  console.error('Bot error:', err);
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+(async () => {
+  try {
+    cleanupOldFiles();
+    cleanupPendingUrls();
+    await bot.launch();
+    console.log('البوت شغال بنظام الأزرار والحقوق... جربه هسه! 🚀');
+  } catch (error) {
+    console.error('Startup error:', error);
+    process.exit(1);
+  }
+})();
