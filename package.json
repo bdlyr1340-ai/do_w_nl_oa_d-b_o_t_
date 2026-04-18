@@ -1,9 +1,9 @@
 {
-  "name": "telegram-media-downloader-bot",
+  "name": "telegram-media-bot-railway",
   "version": "2.0.0",
-  "description": "Single-file Telegram bot for TikTok, Instagram, Stories, and YouTube with Railway-ready Docker deployment and provider fallbacks.",
+  "private": true,
+  "description": "Single-file Telegram bot for Instagram, TikTok, and YouTube on Railway",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },

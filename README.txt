@@ -1,38 +1,39 @@
-Railway + GitHub Deployment
-===========================
+رفع المشروع إلى جذر مستودع GitHub ثم اربطه مع Railway.
 
-1) Put these files in the root of your GitHub repository.
-2) In Railway, create a new project from GitHub.
-3) Railway will detect Dockerfile automatically and build from it.
-4) Add your environment variables in Railway -> Variables.
-5) Deploy.
+المهم:
+1) غيّر التوكن القديم من BotFather فورًا.
+2) أضف Variables في Railway من .env.example.
+3) إذا كان Instagram يفشل في بعض الروابط أو القصص، ففعّل واحدًا على الأقل من هذه الخيارات:
+   - IG_COOKIES_B64
+   - COBALT_API_URL
+   - RAPIDAPI_KEY
 
-Required variables
-------------------
-BOT_TOKEN           Telegram bot token from BotFather (use a NEW token)
-BOT_RIGHTS          Text shown in bot captions, e.g. @VidSave_ProBot
-TMP_DIR             Temporary downloads folder, recommended: ./downloads
-MAX_FILE_SIZE_MB    Telegram upload safety limit; recommended 48
-PORT                Railway port; recommended 3000
-YTDLP_PATH          Path to yt-dlp inside Docker, recommended /usr/local/bin/yt-dlp
+شرح المتغيرات:
+- BOT_TOKEN: توكن البوت.
+- BOT_RIGHTS: يظهر في الرسائل.
+- TMP_DIR: مجلد مؤقت للملفات.
+- MAX_FILE_SIZE_MB: أقصى حجم إرسال إلى تيليجرام.
+- PORT: منفذ الخدمة.
+- USE_WEBHOOK: true أو false.
+- WEBHOOK_DOMAIN: دومين الويب هوك إن استخدمته.
+- WEBHOOK_PATH: مسار الويب هوك.
+- YTDLP_PATH: مسار yt-dlp.
+- FFMPEG_PATH: مسار ffmpeg.
+- REQUEST_TIMEOUT_MS: مهلة طلبات الشبكة.
+- PROVIDER_RETRY_COUNT: عدد محاولات الإعادة لكل مزود.
+- COBALT_API_URL: رابط API احتياطي يدعم Instagram/TikTok.
+- COBALT_API_KEY: إن كانت نسخة Cobalt تتطلب مفتاحًا.
+- RAPIDAPI_KEY: مفتاح RapidAPI الاحتياطي لـ Instagram.
+- RAPIDAPI_INSTAGRAM_HOST: اسم مضيف RapidAPI.
+- IG_COOKIES_B64: أقوى حل لإنستغرام، وهو محتوى cookies.txt بصيغة base64.
 
-Optional variables
-------------------
-USE_WEBHOOK         true/false. false = long polling. true = webhook mode.
-WEBHOOK_DOMAIN      Your public Railway domain if using webhook.
-WEBHOOK_PATH        Webhook path, e.g. /telegram-webhook
-COBALT_API_URL      Optional fallback downloader API compatible with Cobalt
-COBALT_API_KEY      Optional API key for your Cobalt instance if protected
-RAPIDAPI_KEY        Optional RapidAPI key for Instagram fallback API
-RAPIDAPI_INSTAGRAM_HOST  RapidAPI host header for the Instagram API provider
-IG_COOKIES_B64      Base64 of cookies.txt for authenticated Instagram extraction
-IG_COOKIES_URL      Alternative: direct URL to a cookies.txt file
-REQUEST_TIMEOUT_MS  Timeout per provider request; recommended 30000
-PROVIDER_RETRY_COUNT Retry count per provider; recommended 1
+تحويل cookies.txt إلى base64:
+Linux/macOS:
+base64 -w 0 cookies.txt
 
-Important notes
----------------
-- Instagram Stories often need authentication or can hit rate limits.
-- If stories fail, set IG_COOKIES_B64 or IG_COOKIES_URL.
-- Do NOT put your token inside code.
-- If your old token was exposed, revoke it in BotFather and generate a new one.
+Windows PowerShell:
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt"))
+
+ملاحظة مهمة:
+بعض روابط Instagram العامة قد تتطلب login أو تصطدم بـ rate limit. هذا ليس خطأ في Node نفسه. لذلك هذا المشروع يجرب:
+RapidAPI -> Cobalt -> yt-dlp with cookies -> yt-dlp بدون cookies
